@@ -1,0 +1,151 @@
+name: Build iStoreOS for DM4036 (S905B)
+
+on:
+  workflow_dispatch:
+    inputs:
+      releases_branch:
+        description: "Select OpenWrt releases branch"
+        required: false
+        default: "openwrt:24.10.4"
+        type: string
+      openwrt_board:
+        description: "Target device (use s905 for S905B/DM4036)"
+        required: false
+        default: "s905"
+        type: string
+      kernel_repo:
+        description: "Kernel repository"
+        required: false
+        default: "ophub/kernel"
+        type: string
+      kernel_usage:
+        description: "Kernel tag type"
+        required: false
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - test
+          - dev
+      openwrt_kernel:
+        description: "Kernel version(s)"
+        required: false
+        default: "6.1.y_6.12.y"
+        type: string
+      auto_kernel:
+        description: "Auto use latest kernel"
+        required: false
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+      openwrt_size:
+        description: "System image size (boot/root in MiB)"
+        required: false
+        default: "256/1024"
+        type: string
+      openwrt_ip:
+        description: "Default IP address"
+        required: false
+        default: "192.168.1.1"
+        type: string
+      builder_name:
+        description: "Builder signature"
+        required: false
+        default: "DM4036"
+        type: string
+
+env:
+  TZ: Etc/UTC
+  IMAGEBUILDER_SH: config/imagebuilder/imagebuilder.sh
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set release tag
+        id: settag
+        run: |
+          if [[ "${{ github.event.inputs.releases_branch }}" == "" ]]; then
+            echo "RELEASES_BRANCH=openwrt:24.10.4" >> $GITHUB_ENV
+          else
+            echo "RELEASES_BRANCH=${{ github.event.inputs.releases_branch }}" >> $GITHUB_ENV
+          fi
+          echo "RELEASES_BRANCH=${{ env.RELEASES_BRANCH }}"
+
+      - name: Initialize environment
+        id: init
+        run: |
+          chmod +x ${IMAGEBUILDER_SH}
+          source ${IMAGEBUILDER_SH} init_set
+
+      - name: Download OpenWrt Rootfs
+        id: download
+        if: steps.init.outputs.status == 'success' && !cancelled()
+        run: |
+          echo "Downloading OpenWrt ${RELEASES_BRANCH} rootfs..."
+          chmod +x ${IMAGEBUILDER_SH}
+          source ${IMAGEBUILDER_SH} kernel_set
+          source ${IMAGEBUILDER_SH} download_rootfs
+
+      - name: Prepare iStoreOS
+        id: istore
+        if: steps.download.outputs.status == 'success' && !cancelled()
+        run: |
+          cd openwrt-armsr
+
+          echo "Adding iStoreOS feed source..."
+          echo 'src-git istore https://github.com/istoreos/istoreos.git;istoreos-24.10' >> feeds.conf.default
+          echo 'src-git koolcenter https://github.com/xiaoqidian/koolcenter.git;master' >> feeds.conf.default
+
+          echo "Updating feeds..."
+          ./scripts/feeds update -a
+
+          echo "Installing iStoreOS packages..."
+          ./scripts/feeds install istoreos
+          ./scripts/feeds install luci-app-istore
+          ./scripts/feeds install luci-app-store
+          ./scripts/feeds install luci-app-ddnsto
+          ./scripts/feeds install luci-app-koolproxyR
+          ./scripts/feeds install luci-app-passwall
+          ./scripts/feeds install luci-app-ssr-plus
+          ./scripts/feeds install luci-app-v2ray
+
+      - name: Build OpenWrt firmware
+        id: build
+        if: steps.istore.outputs.status == 'success' && !cancelled()
+        run: |
+          chmod +x ${IMAGEBUILDER_SH}
+          source ${IMAGEBUILDER_SH} make_image
+
+      - name: Upload Firmware
+        if: steps.build.outputs.status == 'success' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iStoreOS-DM4036-S905B
+          path: |
+            openwrt/out/**
+          retention-days: 5
+
+      - name: Build summary
+        if: steps.build.outputs.status == 'success' && !cancelled()
+        run: |
+          echo "## Build completed!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Firmware:" >> $GITHUB_STEP_SUMMARY
+          ls -lh openwrt/out/*.img* 2>/dev/null | awk '{print "- "$5" "$9}' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Device: DM4036 (S905B)" >> $GITHUB_STEP_SUMMARY
+          echo "### Default IP: 192.168.1.1" >> $GITHUB_STEP_SUMMARY
+
+      - name: Failure notification
+        if: failure()
+        run: |
+          echo "## Build failed!" >> $GITHUB_STEP_SUMMARY
+          echo "Please check the log for errors." >> $GITHUB_STEP_SUMMARY
